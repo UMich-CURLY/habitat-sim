@@ -1,4 +1,4 @@
-// Copyright (c) Meta Platforms, Inc. and its affiliates.
+// Copyright (c) Facebook, Inc. and its affiliates.
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
@@ -22,8 +22,6 @@
 #include <Magnum/EigenIntegration/Integration.h>
 #include <Magnum/GL/Context.h>
 #include <Magnum/GL/Extensions.h>
-#include <Magnum/GL/TextureFormat.h>
-#include <Magnum/Image.h>
 #include <Magnum/ImageView.h>
 #include <Magnum/Math/FunctionsBatch.h>
 #include <Magnum/Math/Range.h>
@@ -34,7 +32,6 @@
 #include <Magnum/MeshTools/Interleave.h>
 #include <Magnum/MeshTools/Reference.h>
 #include <Magnum/MeshTools/RemoveDuplicates.h>
-#include <Magnum/MeshTools/Transform.h>
 #include <Magnum/PixelFormat.h>
 #include <Magnum/SceneGraph/Object.h>
 #include <Magnum/SceneTools/FlattenMeshHierarchy.h>
@@ -48,13 +45,7 @@
 #include <Magnum/VertexFormat.h>
 
 #include <memory>
-#include <utility>
 
-#include "esp/assets/BaseMesh.h"
-#include "esp/assets/CollisionMeshData.h"
-#include "esp/assets/GenericSemanticMeshData.h"
-#include "esp/assets/MeshMetaData.h"
-#include "esp/assets/RenderAssetInstanceCreationInfo.h"
 #include "esp/geo/Geo.h"
 #include "esp/gfx/GenericDrawable.h"
 #include "esp/gfx/MaterialUtil.h"
@@ -62,10 +53,8 @@
 #include "esp/gfx/replay/Recorder.h"
 #include "esp/io/Json.h"
 #include "esp/io/URDFParser.h"
-#include "esp/metadata/MetadataMediator.h"
 #include "esp/physics/PhysicsManager.h"
 #include "esp/scene/SceneGraph.h"
-#include "esp/scene/SceneManager.h"
 #include "esp/scene/SemanticScene.h"
 
 #include "esp/nav/PathFinder.h"
@@ -106,10 +95,10 @@ using Mn::Trade::MaterialAttribute;
 namespace assets {
 
 ResourceManager::ResourceManager(
-    metadata::MetadataMediator::ptr _metadataMediator,
+    metadata::MetadataMediator::ptr& _metadataMediator,
     Flags _flags)
     : flags_(_flags),
-      metadataMediator_(std::move(_metadataMediator))
+      metadataMediator_(_metadataMediator)
 #ifdef MAGNUM_BUILD_STATIC
       ,
       // avoid using plugins that might depend on different library versions
@@ -170,7 +159,7 @@ void ResourceManager::initDefaultPrimAttributes() {
     return;
   }
 
-  configureImporterManagerGLExtensions();
+  ConfigureImporterManagerGLExtensions();
   // by this point, we should have a GL::Context so load the bb primitive.
   // TODO: replace this completely with standard mesh (i.e. treat the bb
   // wireframe cube no differently than other primitive-based rendered
@@ -565,8 +554,8 @@ bool ResourceManager::loadStage(
     // Either add with pre-built meshGroup if collision assets are loaded
     // or empty vector for mesh group - this should only be the case if
     // we are using None-type physicsManager.
-    bool sceneSuccess =
-        _physicsManager->addStage(stageAttributes, stageInstanceAttributes);
+    bool sceneSuccess = _physicsManager->addStage(
+        stageAttributes, stageInstanceAttributes, meshGroup);
     if (!sceneSuccess) {
       ESP_ERROR() << "Adding Stage" << stageAttributes->getHandle()
                   << "to PhysicsManager failed. Aborting stage initialization.";
@@ -666,12 +655,22 @@ ResourceManager::createStageAssetInfosFromAttributes(
     // This check being false means a specific orientation for semantic meshes
     // was specified in config file, so they should use -this- orientation
     // instead of the base render asset orientation.
+    // if (!stageAttributes->getUseFrameForAllOrientation()) {
+    //   frame = buildFrameFromAttributes(
+    //       stageAttributes->getHandle(), stageAttributes->getSemanticOrientUp(),
+    //       stageAttributes->getSemanticOrientFront(),
+    //       stageAttributes->getOrigin());
+    // }
     if (!stageAttributes->getUseFrameForAllOrientation()) {
       frame = buildFrameFromAttributes(
-          stageAttributes->getHandle(), stageAttributes->getSemanticOrientUp(),
-          stageAttributes->getSemanticOrientFront(),
+          stageAttributes->getHandle(), {0, 1, 0},
+          {0, 0, -1},
           stageAttributes->getOrigin());
     }
+    frame = buildFrameFromAttributes(
+          stageAttributes->getHandle(), {0, 1, 0},
+          {0, 0, -1},
+          stageAttributes->getOrigin());
     AssetInfo semanticInfo{
         semanticType,                               // type
         stageAttributes->getSemanticAssetHandle(),  // file path
@@ -1296,7 +1295,7 @@ void ResourceManager::buildPrimitiveAssetData(
   // set the root rotation to world frame upon load
   meshMetaData.setRootFrameOrientation(info.frame);
   // make LoadedAssetData corresponding to this asset
-  LoadedAssetData loadedAssetData{std::move(info), std::move(meshMetaData)};
+  LoadedAssetData loadedAssetData{info, meshMetaData};
   auto inserted =
       resourceDict_.emplace(primAssetHandle, std::move(loadedAssetData));
 
@@ -1524,7 +1523,7 @@ bool ResourceManager::loadRenderAssetSemantic(const AssetInfo& info) {
   const std::string& filename = info.filepath;
 
   CORRADE_INTERNAL_ASSERT(resourceDict_.count(filename) == 0);
-  configureImporterManagerGLExtensions();
+  ConfigureImporterManagerGLExtensions();
 
   /* Open the file. On error the importer already prints a diagnostic message,
      so no need to do that here. The importer implicitly converts per-face
@@ -1633,16 +1632,13 @@ scene::SceneNode* ResourceManager::createRenderAssetInstanceVertSemantic(
   return instanceRoot;
 }  // ResourceManager::createRenderAssetInstanceVertSemantic
 
-void ResourceManager::configureImporterManagerGLExtensions() {
+void ResourceManager::ConfigureImporterManagerGLExtensions() {
   if (!getCreateRenderer()) {
     return;
   }
 
   Cr::PluginManager::PluginMetadata* const metadata =
       importerManager_.metadata("BasisImporter");
-  if (!metadata)
-    return;
-
   Mn::GL::Context& context = Mn::GL::Context::current();
 #ifdef MAGNUM_TARGET_WEBGL
   if (context.isExtensionSupported<
@@ -1713,7 +1709,7 @@ void ResourceManager::configureImporterManagerGLExtensions() {
   }
 #endif
 
-}  // ResourceManager::configureImporterManagerGLExtensions
+}  // ResourceManager::ConfigureImporterManagerGLExtensions
 
 namespace {
 
@@ -1742,7 +1738,7 @@ bool ResourceManager::loadRenderAssetGeneral(const AssetInfo& info) {
 
   const std::string& filename = info.filepath;
   CORRADE_INTERNAL_ASSERT(resourceDict_.count(filename) == 0);
-  configureImporterManagerGLExtensions();
+  ConfigureImporterManagerGLExtensions();
 
   ESP_CHECK(
       (fileImporter_->openFile(filename) && (fileImporter_->meshCount() > 0u)),
@@ -1759,9 +1755,9 @@ bool ResourceManager::loadRenderAssetGeneral(const AssetInfo& info) {
   auto inserted = resourceDict_.emplace(filename, std::move(loadedAssetData));
   MeshMetaData& meshMetaData = inserted.first->second.meshMetaData;
 
-  // no scenes --- standalone OBJ/PLY files, for example
+  // no default scene --- standalone OBJ/PLY files, for example
   // take a wild guess and load the first mesh with the first material
-  if (!fileImporter_->sceneCount()) {
+  if (fileImporter_->defaultScene() == -1) {
     if ((fileImporter_->meshCount() != 0u) &&
         meshes_.at(meshMetaData.meshIndex.first)) {
       meshMetaData.root.children.emplace_back();
@@ -1773,11 +1769,9 @@ bool ResourceManager::loadRenderAssetGeneral(const AssetInfo& info) {
     }
   }
 
-  /* Load the scene. If no default scene is specified, use the first one. */
+  /* Load the scene */
   Cr::Containers::Optional<Mn::Trade::SceneData> scene;
-  if (!(scene = fileImporter_->scene(fileImporter_->defaultScene() == -1
-                                         ? 0
-                                         : fileImporter_->defaultScene())) ||
+  if (!(scene = fileImporter_->scene(fileImporter_->defaultScene())) ||
       !scene->is3D() || !scene->hasField(Mn::Trade::SceneField::Parent)) {
     ESP_ERROR() << "Cannot load scene, exiting";
     return false;
@@ -1820,7 +1814,7 @@ bool ResourceManager::loadRenderAssetGeneral(const AssetInfo& info) {
 
     // If meshIDLocal != -1 then we have multiple meshes assigned to the same
     // MeshTransformNode.  We make subsequent meshes children of the first mesh
-    // we've seen, and give them identity transforms.
+    // we've seen, and give them identity trasnforms.
     // TODO: either drop MeshTransformNode in favor of SceneData or use
     // Mn::SceneTools::convertToSingleFunctionObjects() when it's exposed.
     esp::assets::MeshTransformNode* tmpNode = &*node;
@@ -1980,7 +1974,7 @@ bool ResourceManager::buildTrajectoryVisualization(
   meshMetaData.setRootFrameOrientation(info.frame);
 
   // make LoadedAssetData corresponding to this asset
-  LoadedAssetData loadedAssetData{std::move(info), std::move(meshMetaData)};
+  LoadedAssetData loadedAssetData{info, meshMetaData};
   // TODO : need to free render assets associated with this object if
   // collision occurs, otherwise leak! (Currently unsupported).
   // if (resourceDict_.count(trajVisName) != 0) {
@@ -2065,7 +2059,7 @@ namespace {
  * @param typeToCheck The type of shader being specified.
  * @param materialData The imported material to check for type
  * @return Whether the imported material's supported types include one
- * congruent with the specified shader type.
+ * congruient with the specified shader type.
  */
 bool compareShaderTypeToMnMatType(const ObjectInstanceShaderType typeToCheck,
                                   const Mn::Trade::MaterialData& materialData) {
@@ -2235,17 +2229,6 @@ ObjectInstanceShaderType ResourceManager::getMaterialShaderType(
               << metadata::attributes::getShaderTypeName(infoSpecShaderType);
   return infoSpecShaderType;
 }  // ResourceManager::getMaterialShaderType
-
-bool ResourceManager::checkForPassedShaderType(
-    const ObjectInstanceShaderType typeToCheck,
-    const Mn::Trade::MaterialData& materialData,
-    const ObjectInstanceShaderType verificationType,
-    const Mn::Trade::MaterialType mnVerificationType) const {
-  return (
-      (typeToCheck == verificationType) ||
-      ((typeToCheck == ObjectInstanceShaderType::Material) &&
-       ((materialData.types() & mnVerificationType) == mnVerificationType)));
-}
 
 gfx::PhongMaterialData::uptr ResourceManager::buildFlatShadedMaterialData(
     const Mn::Trade::MaterialData& materialData,
@@ -2454,8 +2437,8 @@ Mn::Image2D ResourceManager::convertRGBToSemanticId(
   Mn::Image2D resImage{
       Mn::PixelFormat::R16UI, size,
       Cr::Containers::Array<char>{
-          Mn::NoInit, std::size_t(size.product() *
-                                  pixelFormatSize(Mn::PixelFormat::R16UI))}};
+          Mn::NoInit,
+          std::size_t(size.product() * pixelSize(Mn::PixelFormat::R16UI))}};
 
   Cr::Containers::StridedArrayView2D<const Mn::Color3ub> input =
       srcImage.pixels<Mn::Color3ub>();
@@ -2714,45 +2697,6 @@ bool ResourceManager::instantiateAssetsOnDemand(
   return true;
 }  // ResourceManager::instantiateAssetsOnDemand
 
-const std::vector<assets::CollisionMeshData>& ResourceManager::getCollisionMesh(
-    const std::string& collisionAssetHandle) const {
-  auto colMeshGroupIter = collisionMeshGroups_.find(collisionAssetHandle);
-  CORRADE_INTERNAL_ASSERT(colMeshGroupIter != collisionMeshGroups_.end());
-  return colMeshGroupIter->second;
-}
-
-metadata::managers::AssetAttributesManager::ptr
-ResourceManager::getAssetAttributesManager() const {
-  return metadataMediator_->getAssetAttributesManager();
-}
-
-metadata::managers::LightLayoutAttributesManager::ptr
-ResourceManager::getLightLayoutAttributesManager() const {
-  return metadataMediator_->getLightLayoutAttributesManager();
-}
-
-metadata::managers::ObjectAttributesManager::ptr
-ResourceManager::getObjectAttributesManager() const {
-  return metadataMediator_->getObjectAttributesManager();
-}
-
-metadata::managers::PhysicsAttributesManager::ptr
-ResourceManager::getPhysicsAttributesManager() const {
-  return metadataMediator_->getPhysicsAttributesManager();
-}
-
-metadata::managers::StageAttributesManager::ptr
-ResourceManager::getStageAttributesManager() const {
-  return metadataMediator_->getStageAttributesManager();
-}
-
-const MeshMetaData& ResourceManager::getMeshMetaData(
-    const std::string& metaDataName) const {
-  auto resDictMDIter = resourceDict_.find(metaDataName);
-  CORRADE_INTERNAL_ASSERT(resDictMDIter != resourceDict_.end());
-  return resDictMDIter->second.meshMetaData;
-}
-
 void ResourceManager::addObjectToDrawables(
     const ObjectAttributes::ptr& ObjectAttributes,
     scene::SceneNode* parent,
@@ -2971,17 +2915,12 @@ void ResourceManager::joinHierarchy(
         meshes_.at(node.meshIDLocal + metaData.meshIndex.first)
             ->getCollisionMeshData();
     int lastIndex = mesh.vbo.size();
-    if (meshData.primitive != Mn::MeshPrimitive::Triangles) {
-      ESP_WARNING() << "Unsupported mesh primitive in join: "
-                    << meshData.primitive << Mn::Debug::nospace << ", skipping";
-    } else {
-      for (const auto& pos : meshData.positions) {
-        mesh.vbo.push_back(Mn::EigenIntegration::cast<vec3f>(
-            transformFromLocalToWorld.transformPoint(pos)));
-      }
-      for (const auto& index : meshData.indices) {
-        mesh.ibo.push_back(index + lastIndex);
-      }
+    for (const auto& pos : meshData.positions) {
+      mesh.vbo.push_back(Mn::EigenIntegration::cast<vec3f>(
+          transformFromLocalToWorld.transformPoint(pos)));
+    }
+    for (const auto& index : meshData.indices) {
+      mesh.ibo.push_back(index + lastIndex);
     }
   }
 
@@ -3044,20 +2983,6 @@ void ResourceManager::joinSemanticHierarchy(
     joinSemanticHierarchy(mesh, meshObjectIds, metaData, child,
                           transformFromLocalToWorld);
   }
-}
-
-void ResourceManager::setLightSetup(gfx::LightSetup setup,
-                                    const Mn::ResourceKey& key) {
-  // add lights to recorder keyframe
-  if (gfxReplayRecorder_) {
-    gfxReplayRecorder_->clearLightsFromKeyframe();
-    for (const auto& light : setup) {
-      gfxReplayRecorder_->addLightToKeyframe(light);
-    }
-  }
-
-  shaderManager_.set(key, std::move(setup), Mn::ResourceDataState::Mutable,
-                     Mn::ResourcePolicy::Manual);
 }
 
 std::unique_ptr<MeshData> ResourceManager::createJoinedCollisionMesh(
